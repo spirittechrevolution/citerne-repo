@@ -1,10 +1,12 @@
 """
 calcul_jaugeage.py
-Module de calcul de jaugeage pour citerne cylindrique verticale
-à fonds elliptiques.
+Module de calcul de jaugeage pour citerne cylindrique verticale.
 
-Formule fond elliptique :
-  V(h) = π × R² × h² / h_fond × (1 - h / (3 × h_fond))
+Géométrie :
+  - Fond bas  : PLAT  → V(h) = π × R² × h  (formule exacte)
+  - Corps     : cylindrique
+  - Fond haut : BOMBÉ elliptique
+                V(h) = π × R² × h² / h_dome × (1 - h / (3 × h_dome))
 """
 
 import math
@@ -23,12 +25,14 @@ from openpyxl.utils import get_column_letter
 
 class CiterneVertical:
     """
-    Citerne cylindrique verticale à deux fonds elliptiques symétriques.
+    Citerne cylindrique verticale :
+      - Fond bas  : PLAT  (h = 0 → HT)
+      - Corps     : cylindrique
+      - Fond haut : elliptique bombé (h = HT → HF)
 
-    Zones de hauteur (depuis le bas) :
-      [0 … h_fond]              → Fond elliptique bas
-      [h_fond … h_fond + HT]   → Corps cylindrique
-      [h_fond + HT … HF]       → Fond elliptique haut
+    HT  = hauteur du corps cylindrique (depuis le fond plat jusqu'à la tangente du dome)
+    HF  = hauteur totale (fond plat → sommet du dome)
+    h_dome = HF - HT = hauteur du fond bombé supérieur
     """
 
     def __init__(self, diametre_mm: float, HF_mm: float, HT_mm: float,
@@ -38,60 +42,60 @@ class CiterneVertical:
         self.R = self.D / 2
         self.HF = float(HF_mm)
         self.HT = float(HT_mm)
-        self.h_fond = (self.HF - self.HT) / 2  # hauteur d'un fond
+        self.h_dome = self.HF - self.HT   # hauteur du fond bombé haut uniquement
 
-    # --- volumes élémentaires ---
+    # --- volume du fond bombé supérieur ---
 
-    def _V_fond_elliptique(self, h: float) -> float:
+    def _V_dome(self, h: float) -> float:
         """
-        Volume (mm³) d'un fond elliptique rempli jusqu'à la hauteur h.
-        Valide pour 0 ≤ h ≤ h_fond.
+        Volume (mm³) du fond elliptique supérieur rempli jusqu'à h
+        depuis le début du dome (0 ≤ h ≤ h_dome).
+        Formule : π × R² × h² / h_dome × (1 - h / (3 × h_dome))
         """
-        h = max(0.0, min(h, self.h_fond))
+        h = max(0.0, min(h, self.h_dome))
         if h == 0.0:
             return 0.0
-        return math.pi * self.R**2 * h**2 / self.h_fond * (1.0 - h / (3.0 * self.h_fond))
+        return math.pi * self.R**2 * h**2 / self.h_dome * (1.0 - h / (3.0 * self.h_dome))
 
-    def _V_fond_complet(self) -> float:
-        """Volume (mm³) d'un fond elliptique complet = 2/3 × π × R² × h_fond."""
-        return (2.0 / 3.0) * math.pi * self.R**2 * self.h_fond
+    def _V_dome_complet(self) -> float:
+        """Volume total du fond bombé = 2/3 × π × R² × h_dome."""
+        return (2.0 / 3.0) * math.pi * self.R**2 * self.h_dome
 
     # --- volume total à hauteur h ---
 
     def volume_mm3(self, h: float) -> float:
-        """Volume cumulé (mm³) depuis le bas du bac jusqu'à la hauteur h (mm)."""
-        h = max(0.0, min(float(h), self.HF))
-        Vfb = self._V_fond_complet()
+        """
+        Volume cumulé (mm³) depuis le fond plat jusqu'à la hauteur h (mm).
 
-        if h <= self.h_fond:
-            return self._V_fond_elliptique(h)
-        elif h <= self.h_fond + self.HT:
-            return Vfb + math.pi * self.R**2 * (h - self.h_fond)
+        Zone corps  (0 ≤ h ≤ HT)  : V = π × R² × h  (fond plat → formule exacte)
+        Zone dome   (HT < h ≤ HF) : V = V_corps_complet + V_dome(h - HT)
+        """
+        h = max(0.0, min(float(h), self.HF))
+
+        if h <= self.HT:
+            # Fond plat + corps cylindrique
+            return math.pi * self.R**2 * h
         else:
-            h_haut = h - self.h_fond - self.HT
-            return Vfb + math.pi * self.R**2 * self.HT + self._V_fond_elliptique(h_haut)
+            # Corps complet + portion du dome supérieur
+            V_corps = math.pi * self.R**2 * self.HT
+            return V_corps + self._V_dome(h - self.HT)
 
     def volume_L(self, h: float) -> float:
-        """Volume en litres à la hauteur h (mm)."""
         return self.volume_mm3(h) / 1_000_000.0
 
     def volume_m3(self, h: float) -> float:
-        """Volume en m³ à la hauteur h (mm)."""
         return self.volume_mm3(h) / 1_000_000_000.0
 
     def delta_L_par_mm(self, h: float) -> float:
-        """Incrément de volume (L) pour 1 mm à la hauteur h."""
         if h < 1:
             return self.volume_L(1.0)
         return self.volume_L(h) - self.volume_L(h - 1.0)
 
     def zone(self, h: float) -> str:
-        if h <= self.h_fond:
-            return "Fond bas"
-        elif h <= self.h_fond + self.HT:
-            return "Corps"
+        if h <= self.HT:
+            return "Corps (fond plat)"
         else:
-            return "Fond haut"
+            return "Fond bombé haut"
 
     # --- construction du tableau ---
 
@@ -119,20 +123,61 @@ class CiterneVertical:
 
     def resume(self, H_mort: float, H_aspiration: float) -> dict:
         return {
-            "Volume fond bas": self._V_fond_complet() / 1e6,
-            "Volume corps cylindrique": math.pi * self.R**2 * self.HT / 1e6,
-            "Volume fond haut": self._V_fond_complet() / 1e6,
-            "Volume total (L)": self.volume_L(self.HF),
-            "Volume total (m³)": self.volume_m3(self.HF),
-            "Volume mort (L)": self.volume_L(H_mort),
-            "Volume à aspiration (L)": self.volume_L(H_aspiration),
-            "Volume utile (L)": self.volume_L(self.HF) - self.volume_L(H_mort),
+            "Volume corps cylindrique (L)": math.pi * self.R**2 * self.HT / 1e6,
+            "Volume fond bombé haut (L)":  self._V_dome_complet() / 1e6,
+            "Volume total (L)":            self.volume_L(self.HF),
+            "Volume total (m³)":           self.volume_m3(self.HF),
+            "Volume mort (L)":             self.volume_L(H_mort),
+            "Volume à aspiration (L)":     self.volume_L(H_aspiration),
+            "Volume utile (L)":            self.volume_L(self.HF) - self.volume_L(H_mort),
         }
 
 
 # ---------------------------------------------------------------------------
 # Export Excel
 # ---------------------------------------------------------------------------
+
+def hauteur_pour_volume(citerne: CiterneVertical, volume: float, unite: str = "L",
+                        tolerance_mm: float = 0.1) -> dict:
+    """
+    Recherche inverse : retourne la hauteur (mm) correspondant au volume donné.
+
+    unite   : "L" (litres), "m3" (mètres cubes) ou "mm3" (millimètres cubes)
+    Méthode : recherche binaire sur volume_mm3(h) qui est strictement croissante.
+    Retourne un dict avec hauteur, volume exact à cette hauteur, et zone.
+    """
+    if unite == "L":
+        V_mm3 = volume * 1_000_000.0
+    elif unite == "m3":
+        V_mm3 = volume * 1_000_000_000.0
+    else:
+        V_mm3 = float(volume)
+
+    V_min = citerne.volume_mm3(0)
+    V_max = citerne.volume_mm3(citerne.HF)
+
+    if V_mm3 <= V_min:
+        h = 0.0
+    elif V_mm3 >= V_max:
+        h = citerne.HF
+    else:
+        lo, hi = 0.0, citerne.HF
+        while hi - lo > tolerance_mm:
+            mid = (lo + hi) / 2.0
+            if citerne.volume_mm3(mid) < V_mm3:
+                lo = mid
+            else:
+                hi = mid
+        h = (lo + hi) / 2.0
+
+    return {
+        "hauteur_mm": round(h, 1),
+        "volume_L":   round(citerne.volume_L(h), 2),
+        "volume_m3":  round(citerne.volume_m3(h), 4),
+        "volume_mm3": round(citerne.volume_mm3(h), 0),
+        "zone":       citerne.zone(h),
+    }
+
 
 def export_excel(
     citerne: CiterneVertical,
@@ -269,26 +314,26 @@ def export_excel(
     ws2["A1"].alignment = Alignment(horizontal="center")
 
     params = [
-        ("Appellation",                    citerne.appellation),
-        ("Diamètre intérieur (D)",         f"{citerne.D:,.0f} mm"),
-        ("Rayon (R)",                      f"{citerne.R:,.0f} mm"),
-        ("Circonférence",                  f"{math.pi * citerne.D:,.1f} mm"),
-        ("Hauteur totale fond à fond (HF)", f"{citerne.HF:,.0f} mm"),
-        ("Hauteur corps cylindrique (HT)", f"{citerne.HT:,.0f} mm"),
-        ("Hauteur fond elliptique",        f"{citerne.h_fond:.1f} mm"),
+        ("Appellation",                     citerne.appellation),
+        ("Diamètre intérieur (D)",          f"{citerne.D:,.0f} mm"),
+        ("Rayon (R)",                       f"{citerne.R:,.0f} mm"),
+        ("Circonférence",                   f"{math.pi * citerne.D:,.1f} mm"),
+        ("Hauteur totale HF",               f"{citerne.HF:,.0f} mm"),
+        ("Hauteur corps cylindrique HT",    f"{citerne.HT:,.0f} mm"),
+        ("Hauteur fond bombé supérieur",    f"{citerne.h_dome:.1f} mm"),
+        ("Fond inférieur",                  "PLAT"),
         ("", ""),
-        ("Volume fond bas (complet)",      f"{citerne._V_fond_complet()/1e6:,.1f} L"),
-        ("Volume corps cylindrique",       f"{math.pi*citerne.R**2*citerne.HT/1e6:,.1f} L"),
-        ("Volume fond haut (complet)",     f"{citerne._V_fond_complet()/1e6:,.1f} L"),
-        ("VOLUME TOTAL CALCULÉ",           f"{citerne.volume_L(citerne.HF):,.1f} L  /  {citerne.volume_m3(citerne.HF):,.2f} m³"),
-        ("Volume nominal (référence)",     "1 200 000 L"),
+        ("Volume corps cylindrique",        f"{math.pi*citerne.R**2*citerne.HT/1e6:,.1f} L"),
+        ("Volume fond bombé haut (complet)",f"{citerne._V_dome_complet()/1e6:,.1f} L"),
+        ("VOLUME TOTAL CALCULÉ",            f"{citerne.volume_L(citerne.HF):,.1f} L  /  {citerne.volume_m3(citerne.HF):,.2f} m³"),
+        ("Volume nominal (référence)",      "1 200 000 L"),
         ("", ""),
-        ("Hauteur volume mort",            f"{H_mort:.0f} mm"),
-        ("Volume mort",                    f"{citerne.volume_L(H_mort):,.1f} L"),
-        ("Hauteur aspiration",             f"{H_aspiration:.0f} mm"),
-        ("Volume à l'aspiration",          f"{citerne.volume_L(H_aspiration):,.1f} L"),
-        ("Volume utile (aspir. → plein)",  f"{citerne.volume_L(citerne.HF)-citerne.volume_L(H_mort):,.1f} L"),
-        ("ΔV par mm (corps cyl.)",         f"{citerne.delta_L_par_mm(citerne.h_fond + citerne.HT/2):,.2f} L/mm"),
+        ("Hauteur volume mort",             f"{H_mort:.0f} mm"),
+        ("Volume mort (= π×R²×H_mort)",    f"{citerne.volume_L(H_mort):,.1f} L"),
+        ("Hauteur aspiration",              f"{H_aspiration:.0f} mm"),
+        ("Volume à l'aspiration",           f"{citerne.volume_L(H_aspiration):,.1f} L"),
+        ("Volume utile (aspir. → plein)",   f"{citerne.volume_L(citerne.HF)-citerne.volume_L(H_mort):,.1f} L"),
+        ("ΔV par mm (corps cylindrique)",   f"{citerne.delta_L_par_mm(citerne.HT/2):,.2f} L/mm"),
     ]
 
     for row_i, (label, value) in enumerate(params, 2):
@@ -323,13 +368,12 @@ def export_excel(
         c.border = bord
 
     key_points = [
-        ("Fond vide",                         0,                          fill(C_BLANC)),
-        ("Fin fond bas / début corps",         citerne.h_fond,            fill(C_BLEU_CLAIR)),
-        (f"Volume mort  (H={H_mort:.0f} mm)", H_mort,                    fill(C_MORT_BORD)),
-        (f"Aspiration   (H={H_aspiration:.0f} mm)", H_aspiration,        fill(C_VERT)),
-        ("Mi-hauteur totale",                  citerne.HF / 2,            fill(C_BLANC)),
-        ("Fin corps / début fond haut",        citerne.h_fond + citerne.HT, fill(C_BLEU_CLAIR)),
-        ("PLEIN (100 %)",                      citerne.HF,                fill(C_ROUGE_FOND)),
+        ("Fond plat vide (h = 0)",                0,           fill(C_BLANC)),
+        (f"Volume mort  (H={H_mort:.0f} mm)",     H_mort,      fill(C_MORT_BORD)),
+        (f"Aspiration   (H={H_aspiration:.0f} mm)", H_aspiration, fill(C_VERT)),
+        ("Mi-hauteur corps",                       citerne.HT / 2,  fill(C_BLANC)),
+        ("Début fond bombé (H = HT)",              citerne.HT,  fill(C_BLEU_CLAIR)),
+        ("PLEIN (100 %)",                          citerne.HF,  fill(C_ROUGE_FOND)),
     ]
 
     for row_i, (desc, h_val, bg) in enumerate(key_points, 3):

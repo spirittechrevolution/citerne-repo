@@ -11,7 +11,7 @@ import math
 import pandas as pd
 import streamlit as st
 
-from calcul_jaugeage import CiterneVertical, export_excel
+from calcul_jaugeage import CiterneVertical, export_excel, hauteur_pour_volume
 
 # -----------------------------------------------------------------------
 # Configuration de la page
@@ -86,12 +86,16 @@ col4.metric("Volume utile",
 # Détail des zones
 # -----------------------------------------------------------------------
 with st.expander("Détail des zones géométriques"):
-    Vfb  = citerne._V_fond_complet() / 1e6
-    Vcyl = math.pi * citerne.R**2 * citerne.HT / 1e6
+    Vcyl  = math.pi * citerne.R**2 * citerne.HT / 1e6
+    Vdome = citerne._V_dome_complet() / 1e6
     data_zones = {
-        "Zone": ["Fond bas (elliptique)", "Corps cylindrique", "Fond haut (elliptique)", "**TOTAL**"],
-        "Hauteur (mm)": [f"0 → {citerne.h_fond:.0f}", f"{citerne.h_fond:.0f} → {citerne.h_fond+citerne.HT:.0f}", f"{citerne.h_fond+citerne.HT:.0f} → {citerne.HF:.0f}", ""],
-        "Volume (L)": [f"{Vfb:,.1f}", f"{Vcyl:,.1f}", f"{Vfb:,.1f}", f"**{Vfb+Vcyl+Vfb:,.1f}**"],
+        "Zone": ["Corps cylindrique (fond plat)", "Fond bombé supérieur", "**TOTAL**"],
+        "Hauteur (mm)": [
+            f"0 → {citerne.HT:.0f}",
+            f"{citerne.HT:.0f} → {citerne.HF:.0f}  (h_dome = {citerne.h_dome:.0f} mm)",
+            "",
+        ],
+        "Volume (L)": [f"{Vcyl:,.1f}", f"{Vdome:,.1f}", f"**{Vcyl+Vdome:,.1f}**"],
     }
     st.table(pd.DataFrame(data_zones))
 
@@ -114,18 +118,75 @@ with tab3:
     st.dataframe(df[mask2], use_container_width=True)
 
 # -----------------------------------------------------------------------
-# Recherche rapide par hauteur
+# Recherche par hauteur → volume
 # -----------------------------------------------------------------------
-st.subheader("Recherche rapide")
-h_search = st.number_input("Entrez une hauteur (mm) pour voir le volume correspondant :",
-                            min_value=0, max_value=int(HF), value=1000, step=1)
+st.subheader("Recherche : Hauteur → Volume")
+h_search = st.number_input("Hauteur (mm) :",
+                            min_value=0, max_value=int(HF), value=1000, step=1,
+                            key="search_h")
 row = df[df["Hauteur (mm)"] == h_search]
 if not row.empty:
     r = row.iloc[0]
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Volume (L)",  f"{r['Volume (L)']:,.2f}")
-    c2.metric("Volume (m³)", f"{r['Volume (m³)']:,.4f}")
-    c3.metric("ΔV (L/mm)",   f"{r['ΔV (L/mm)']:,.2f}")
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Volume brut (L)",       f"{r['Volume (L)']:,.2f}")
+    c2.metric("Vol. utilisable (L)",   f"{r['Vol. utilisable (L)']:,.2f}")
+    c3.metric("Volume (m³)",           f"{r['Volume (m³)']:,.4f}")
+    c4.metric("Volume (mm³)",          f"{r['Volume (L)'] * 1_000_000:,.0f}")
+    c5.metric("ΔV (L/mm)",            f"{r['ΔV (L/mm)']:,.2f}")
+    st.caption(f"Zone : {r['Zone']}")
+
+st.divider()
+
+# -----------------------------------------------------------------------
+# Recherche par volume → hauteur  (RECHERCHE INVERSE)
+# -----------------------------------------------------------------------
+st.subheader("Recherche : Volume → Hauteur")
+
+col_unite, col_val = st.columns([1, 3])
+with col_unite:
+    unite = st.radio("Unité", ["Litres (L)", "Mètres³ (m³)", "Millimètres³ (mm³)"], index=0, key="unite_inv")
+with col_val:
+    if unite.startswith("Litres"):
+        unite_code = "L"
+        V_max_affiche = citerne.volume_L(HF)
+        step_val = 100.0
+        label_vol = "Volume en litres (L) :"
+        fmt = "%.2f"
+    elif unite.startswith("Mètres"):
+        unite_code = "m3"
+        V_max_affiche = citerne.volume_m3(HF)
+        step_val = 1.0
+        label_vol = "Volume en mètres cubes (m³) :"
+        fmt = "%.4f"
+    else:
+        unite_code = "mm3"
+        V_max_affiche = citerne.volume_mm3(HF)
+        step_val = 1_000_000.0
+        label_vol = "Volume en millimètres cubes (mm³) :"
+        fmt = "%.0f"
+
+    vol_saisi = st.number_input(
+        label_vol,
+        min_value=0.0,
+        max_value=float(V_max_affiche),
+        value=0.0,
+        step=step_val,
+        format=fmt,
+        key="search_vol",
+    )
+
+if vol_saisi > 0:
+    res = hauteur_pour_volume(citerne, vol_saisi, unite=unite_code)
+    st.success(f"Hauteur correspondante : **{res['hauteur_mm']:,.1f} mm**")
+    r1, r2, r3, r4 = st.columns(4)
+    r1.metric("Hauteur (mm)",       f"{res['hauteur_mm']:,.1f}")
+    r2.metric("Volume exact (L)",   f"{res['volume_L']:,.2f}")
+    r3.metric("Volume exact (m³)",  f"{res['volume_m3']:,.4f}")
+    r4.metric("Volume exact (mm³)", f"{res['volume_mm3']:,.0f}")
+    st.caption(f"Zone : {res['zone']}")
+
+    if res["hauteur_mm"] <= H_mort:
+        st.warning(f"Ce volume est dans la zone morte (H ≤ {H_mort} mm) — Vol. utilisable = 0 L")
 
 # -----------------------------------------------------------------------
 # Génération et téléchargement Excel
